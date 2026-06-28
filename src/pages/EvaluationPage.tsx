@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Student, Competency, Level } from "../types";
 import { LEVELS, LEVEL_LABELS, LEVEL_COLORS } from "../types";
@@ -48,7 +48,18 @@ export default function EvaluationPage() {
   const [currentEval, setCurrentEval] = useState<EvalWithComp | null>(null);
   const [results, setResults] = useState<ResultEntry[]>([]);
 
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState("");
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, EvalWithComp[]>();
+    for (const ev of evaluations) {
+      const key = `${ev.domain} › ${ev.subdomain}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(ev);
+    }
+    return map;
+  }, [evaluations]);
 
   const loadEvaluations = useCallback(async (per: string) => {
     const evals = await invoke<EvalWithComp[]>("list_evaluations", { period: per });
@@ -266,47 +277,58 @@ export default function EvaluationPage() {
             </div>
           </div>
 
-          {/* Historique */}
+          {/* Historique groupé par domaine */}
           {evaluations.length > 0 && (
             <div>
               <h3>Évaluations du semestre</h3>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={thStyle}>Date</th>
-                    <th style={thStyle}>Intitulé</th>
-                    <th style={thStyle}>Compétence LSU</th>
-                    <th style={thStyle}></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {evaluations.map((ev) => (
-                    <tr key={ev.id}>
-                      <td style={tdStyle}>{ev.date}</td>
-                      <td style={tdStyle}>
-                        <a
-                          href="#"
-                          onClick={(e) => { e.preventDefault(); openEvaluation(ev); }}
-                          style={{ cursor: "pointer" }}
-                        >
-                          {ev.title}
-                        </a>
-                      </td>
-                      <td style={{ ...tdStyle, fontSize: "0.85em", opacity: 0.7 }}>
-                        {ev.domain} › {ev.subdomain}
-                      </td>
-                      <td style={tdStyle}>
-                        <button
-                          onClick={() => deleteEval(ev.id)}
-                          style={{ padding: "2px 8px", fontSize: "0.8em" }}
-                        >
-                          ✕
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {[...grouped.entries()].map(([groupKey, evs]) => {
+                const collapsed = collapsedGroups.has(groupKey);
+                return (
+                  <div key={groupKey} style={{ marginBottom: 12 }}>
+                    <div
+                      onClick={() => setCollapsedGroups((prev) => {
+                        const next = new Set(prev);
+                        collapsed ? next.delete(groupKey) : next.add(groupKey);
+                        return next;
+                      })}
+                      style={{
+                        cursor: "pointer", padding: "6px 0",
+                        display: "flex", alignItems: "center", gap: 8,
+                        fontWeight: 600, borderBottom: "1px solid #ddd",
+                      }}
+                    >
+                      <span style={{ fontSize: "0.8em" }}>{collapsed ? "▶" : "▼"}</span>
+                      <span>{groupKey}</span>
+                      <span style={{ fontWeight: "normal", opacity: 0.5, fontSize: "0.85em" }}>
+                        ({evs.length})
+                      </span>
+                    </div>
+                    {!collapsed && (
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <tbody>
+                          {evs.map((ev) => (
+                            <tr key={ev.id}>
+                              <td style={{ ...tdStyle, width: 110, opacity: 0.6, fontSize: "0.85em" }}>
+                                {ev.date}
+                              </td>
+                              <td style={tdStyle}>
+                                <a href="#" onClick={(e) => { e.preventDefault(); openEvaluation(ev); }}>
+                                  {ev.title}
+                                </a>
+                              </td>
+                              <td style={{ ...tdStyle, width: 32, textAlign: "right" }}>
+                                <button onClick={() => deleteEval(ev.id)} style={{ padding: "2px 8px", fontSize: "0.8em" }}>
+                                  ✕
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </>
