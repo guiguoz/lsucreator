@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type ModelId = "llama-3.3-70b-versatile" | "llama-3.1-8b-instant" | "mixtral-8x7b-32768";
+const KNOWN_MODELS = ["qwen3:8b", "gemma3:12b", "llama3.2:3b", "mistral:7b"];
+const DEFAULT_URL = "http://localhost:11434/v1/chat/completions";
 
 async function getSetting(key: string) {
   return invoke<string | null>("get_setting", { key });
@@ -28,9 +29,8 @@ export default function SettingsPage() {
   const [_period, setPeriod] = useState("S1-2025-2026");
   const [semester, setSemester] = useState<"S1" | "S2">("S1");
   const [yearStart, setYearStart] = useState<number>(2025);
-  const [model, setModel] = useState<ModelId>("llama-3.3-70b-versatile");
-  const [apiKey, setApiKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [model, setModel] = useState("qwen3:8b");
+  const [ollamaUrl, setOllamaUrl] = useState(DEFAULT_URL);
 
   useEffect(() => {
     (async () => {
@@ -50,12 +50,11 @@ export default function SettingsPage() {
         setPeriod(`S1-${y}-${y + 1}`);
       }
 
-      const m = await getSetting("groq_model");
-      const validModels: ModelId[] = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"];
-      if (m && validModels.includes(m as ModelId)) setModel(m as ModelId);
+      const m = await getSetting("ollama_model");
+      if (m) setModel(m);
 
-      const k = await getSetting("groq_api_key");
-      if (k) setApiKey(k);
+      const u = await getSetting("ollama_url");
+      if (u) setOllamaUrl(u);
 
       setLoaded(true);
     })().catch((e) => setStatus(String(e)));
@@ -66,17 +65,17 @@ export default function SettingsPage() {
     const formatted = `${semester}-${yearStart}-${yearStart + 1}`;
     setPeriod(formatted);
     await setSetting("current_period", formatted);
-    await setSetting("groq_model", model);
-    await setSetting("groq_api_key", apiKey.trim());
+    await setSetting("ollama_model", model.trim());
+    await setSetting("ollama_url", ollamaUrl.trim());
     setStatus("✓ Enregistré");
     setTimeout(() => setStatus(""), 1200);
   }
 
-  async function testKey() {
+  async function testConnection() {
     setStatus("Test en cours...");
     try {
       const res = await invoke<{ ok: boolean; message: string }>("test_groq", {
-        input: { api_key: apiKey, model },
+        input: { model: model.trim(), url: ollamaUrl.trim() },
       });
       setStatus(res.ok ? "✓ " + res.message : "✗ " + res.message);
     } catch (e) {
@@ -187,30 +186,39 @@ export default function SettingsPage() {
         )}
       </div>
 
-      <label style={{ display: "block", marginTop: 12 }}>Modèle Groq</label>
-      <select
-        value={model}
-        onChange={(e) => setModel(e.currentTarget.value as ModelId)}
-        disabled={!loaded}
-      >
-        <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (recommandé)</option>
-        <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
-        <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (rapide)</option>
-      </select>
-
-      <label style={{ display: "block", marginTop: 12 }}>Clé API Groq</label>
-      <div className="row">
-        <input
-          value={apiKey}
-          onChange={(e) => setApiKey(e.currentTarget.value)}
-          placeholder="gsk_..."
-          type={showKey ? "text" : "password"}
+      <label style={{ display: "block", marginTop: 16 }}>Modèle Ollama</label>
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <select
+          value={KNOWN_MODELS.includes(model) ? model : "__custom__"}
+          onChange={(e) => {
+            if (e.currentTarget.value !== "__custom__") setModel(e.currentTarget.value);
+          }}
           disabled={!loaded}
+        >
+          {KNOWN_MODELS.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+          {!KNOWN_MODELS.includes(model) && (
+            <option value="__custom__">{model}</option>
+          )}
+        </select>
+        <input
+          value={model}
+          onChange={(e) => setModel(e.currentTarget.value)}
+          placeholder="nom:tag"
+          disabled={!loaded}
+          style={{ flex: 1 }}
         />
-        <button type="button" onClick={() => setShowKey((v) => !v)} disabled={!loaded}>
-          {showKey ? "Masquer" : "Afficher"}
-        </button>
       </div>
+
+      <label style={{ display: "block", marginTop: 12 }}>URL Ollama</label>
+      <input
+        value={ollamaUrl}
+        onChange={(e) => setOllamaUrl(e.currentTarget.value)}
+        placeholder={DEFAULT_URL}
+        disabled={!loaded}
+        style={{ width: "100%" }}
+      />
 
       <label style={{ display: "block", marginTop: 20 }}>Données</label>
       <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -219,14 +227,11 @@ export default function SettingsPage() {
       </div>
 
       <div className="row" style={{ marginTop: 16, gap: 8 }}>
-        <button
-          onClick={saveAll}
-          disabled={!loaded || apiKey.trim() === ""}
-        >
+        <button onClick={saveAll} disabled={!loaded}>
           Enregistrer
         </button>
-        <button type="button" onClick={testKey} disabled={!loaded || apiKey.trim() === ""}>
-          Tester la clé
+        <button type="button" onClick={testConnection} disabled={!loaded}>
+          Tester Ollama
         </button>
       </div>
 

@@ -490,17 +490,17 @@ async fn generate_bilan(
   state: State<'_, AppState>,
   input: GenerateBilanInput,
 ) -> Result<GenerateBilanOutput, String> {
-  let api_key: String = sqlx::query("SELECT value FROM settings WHERE key = ?")
-    .bind("groq_api_key")
-    .fetch_optional(&state.db).await.map_err(|e| e.to_string())?
-    .map(|r| r.get("value"))
-    .ok_or("Clé API Groq non configurée. Allez dans Réglages.")?;
-
   let model: String = sqlx::query("SELECT value FROM settings WHERE key = ?")
-    .bind("groq_model")
+    .bind("ollama_model")
     .fetch_optional(&state.db).await.map_err(|e| e.to_string())?
     .map(|r| r.get("value"))
-    .unwrap_or_else(|| "llama-3.3-70b-versatile".into());
+    .unwrap_or_else(|| "qwen3:8b".into());
+
+  let ollama_url: String = sqlx::query("SELECT value FROM settings WHERE key = ?")
+    .bind("ollama_url")
+    .fetch_optional(&state.db).await.map_err(|e| e.to_string())?
+    .map(|r| r.get("value"))
+    .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".into());
 
   // Group by domain, excluding NE (non évalué)
   let mut by_domain: indexmap::IndexMap<String, Vec<&BilanDomainEntry>> = indexmap::IndexMap::new();
@@ -524,39 +524,42 @@ async fn generate_bilan(
 
   let mut details = String::new();
   for (domain, entries) in &by_domain {
-    for e in entries {
-      details.push_str(&format!(
-        "- Domaine : {domain} | Sous-domaine : {subdomain} | Compétence : {comp} | Niveau interne : {synth} | Niveau LSU : {lsu}\n",
-        domain = domain, subdomain = e.subdomain, comp = e.competency,
-        synth = e.synthesis, lsu = e.lsu_level,
-      ));
+    let maitrise: Vec<&str> = entries.iter()
+      .filter(|e| e.synthesis == "A")
+      .take(3)
+      .map(|e| e.competency.as_str())
+      .collect();
+    let bonne_voie: Vec<&str> = entries.iter()
+      .filter(|e| e.synthesis == "AR")
+      .take(2)
+      .map(|e| e.competency.as_str())
+      .collect();
+    let a_consolider: Vec<&str> = entries.iter()
+      .filter(|e| e.synthesis == "ECA" || e.synthesis == "NA")
+      .take(2)
+      .map(|e| e.competency.as_str())
+      .collect();
+    details.push_str(&format!("\n{domain}\n", domain = domain));
+    if !maitrise.is_empty() {
+      details.push_str(&format!("  Maîtrise : {}\n", maitrise.join(", ")));
+    }
+    if !bonne_voie.is_empty() {
+      details.push_str(&format!("  En bonne voie : {}\n", bonne_voie.join(", ")));
+    }
+    if !a_consolider.is_empty() {
+      details.push_str(&format!("  À consolider : {}\n", a_consolider.join(", ")));
     }
   }
 
   let prompt = format!(
     "Rédige l'appréciation LSU de l'élève suivant.\n\n\
-     Élève\n\
-     Prénom : {name}\n\
-     Niveau : {level}\n\n\
-     Compétences évaluées\n\
-     Les compétences ci-dessous correspondent à l'ensemble du semestre.\n\
-     Pour chacune sont indiqués : domaine, sous-domaine, compétence, niveau interne, niveau LSU.\n\
-     (Niveaux internes : A = Acquis, AR = À renforcer, ECA = En cours d'acquisition, NA = Non acquis.\n\
-     Niveaux LSU : A = atteint, ECA = partiellement atteint, NA = non atteint.)\n\n\
+     Élève : {name} — Niveau : {level}\n\n\
+     Les données ci-dessous sont des constats d'observation. Ne les interprète pas. \
+     Ne cherche pas à expliquer les causes des progrès ou des difficultés. \
+     Ne crée aucun lien logique entre deux compétences si ce lien n'est pas explicitement fourni.\n\
      {details}\n\
      {teacher_obs}\
      {s1_context}\
-     Avant de rédiger, réalise silencieusement les étapes suivantes :\n\
-     1. Identifier les points forts dominants.\n\
-     2. Identifier les éventuelles difficultés importantes.\n\
-     3. Déterminer la tendance générale (progrès, stabilité ou régression).\n\
-     4. Déterminer le ton adapté au profil de cet élève.\n\
-     Rédige ensuite une appréciation fluide sans révéler ce raisonnement.\n\n\
-     Ne cherche pas à mentionner toutes les compétences. Identifie les tendances dominantes. \
-     Une compétence isolée ne doit pas influencer fortement l'appréciation si la majorité des résultats est positive.\n\n\
-     Évite les formulations génériques répétitives telles que : \
-     « Continue ainsi. », « Poursuis tes efforts. », « Il faut continuer à travailler. », « Bon trimestre. »\n\
-     Préfère des formulations précises et contextualisées en fonction du profil de l'élève.\n\n\
      {closing}",
     level = input.level, name = input.student_name,
     details = details,
@@ -601,16 +604,17 @@ async fn generate_bilan(
 
   let body = serde_json::json!({
     "model": model,
+    "temperature": 0.65,
     "messages": [
-      { "role": "system", "content": "Tu es un enseignant expérimenté d'école primaire en France. Tu rédiges les appréciations du Livret Scolaire Unique (LSU).\n\nTon objectif est de produire une appréciation authentique, professionnelle et personnalisée, comparable à celles rédigées par un enseignant.\n\nRègles impératives :\n- rédiger une appréciation unique, sans titre ni introduction ;\n- utiliser un ton bienveillant, factuel et encourageant ;\n- toujours mettre en avant les réussites avant les points à améliorer ;\n- ne jamais faire une liste de compétences ou de disciplines ;\n- produire une synthèse globale des apprentissages et de l'attitude de l'élève ;\n- faire ressortir au maximum 2 ou 3 idées importantes ;\n- éviter les répétitions, les tournures stéréotypées et les phrases toutes faites ;\n- varier le vocabulaire d'un élève à l'autre ;\n- ne jamais citer les intitulés exacts des compétences ;\n- ne jamais mentionner les niveaux LSU (« Très bonne maîtrise », « Maîtrise satisfaisante »...), mais les traduire naturellement dans le texte ;\n- ne jamais inventer d'informations absentes des données fournies ;\n- en cas de résultats contrastés, nuancer le propos sans être négatif ;\n- si des observations de l'enseignant sont présentes, elles sont prioritaires sur l'interprétation des compétences ;\n- respecter strictement les consignes de clôture selon le semestre.\n\nLongueur attendue : 600 à 800 caractères, espaces compris.\n\nRépondre uniquement avec le texte de l'appréciation." },
-      { "role": "user", "content": prompt }
+      { "role": "system", "content": "Tu es un enseignant de primaire expérimenté en France. Tu rédiges des appréciations de LSU destinées aux familles.\n\nOBJECTIF — Tu ne transformes pas des compétences en phrases.\nTu rédiges un diagnostic global d'enseignant, à partir des informations fournies.\nLes compétences sont un support de réflexion interne, pas un plan à suivre.\nLe texte final doit pouvoir avoir été écrit directement par un enseignant, sans aucun signe de génération automatique.\n\nSTYLE :\n- Phrases simples et directes. Ce n'est pas un texte littéraire.\n- L'enseignant parle à la première personne : « j'encourage », « je l'en félicite », « je compte sur toi », « je suis convaincu ».\n- Ton bienveillant mais authentique — ni froid, ni artificiel.\n- Varie les débuts selon le profil. N'utilise pas systématiquement « X a... » ou « Cette année... ».\n- Aucune phrase ne dépasse 30 mots.\n\nCONTENU :\n- 3 à 4 idées importantes. Ne mentionne pas tout. Un enseignant fait un tri.\n- Chaque phrase apporte une information nouvelle. Jamais de reformulation.\n- N'invente aucun comportement, attitude ou progression absent des données.\n- Si des observations de l'enseignant sont fournies, elles sont prioritaires.\n- Résultats contrastés : commence par les réussites, nuance sans être négatif.\n\nTRANSFORMATION — structure nominale directe (sans verbe = sans dérive) :\nCopie (Acquis) → « copie maîtrisée » ou « copie correcte »\nCalcul mental (À consolider) → « calcul mental à consolider »\nCompréhension (En bonne voie) → « compréhension en progrès »\nConjugaison (Acquis) → « conjugaison acquise »\nLecture (À consolider) → « lecture à renforcer »\nNe jamais transformer une compétence en comportement ou stratégie mentale.\n\nSTRUCTURE (adapter selon le profil) :\nBilan général → ce qui va bien → ce qui reste à travailler → encouragement.\nToutes les parties ne sont pas obligatoires : un excellent élève n'a pas forcément de points faibles significatifs.\n\nEXEMPLES :\n\nÉlève excellent :\n« Durant ce premier semestre, l'élève a obtenu d'excellents résultats et a montré une très bonne participation orale, enrichissant les échanges en classe. Cependant, un léger manque de confiance a parfois limité son expression. En continuant à travailler sur ce point, elle pourra libérer tout son potentiel. Bravo pour ce très bon travail, continue ainsi — avec un peu plus de confiance, tu pourras aller encore plus loin au second semestre ! »\n\nÉlève en progrès :\n« Au début de l'année, cet élève avait tendance à se précipiter, ce qui lui causait quelques erreurs. Fort heureusement, cette habitude semble aujourd'hui disparue. Il fait preuve de plus de rigueur, participe activement en classe et est appliqué dans son travail. Il est important qu'il continue sur cette dynamique au second semestre pour consolider ses progrès et aller encore plus loin. Je compte sur toi ! »\n\nÉlève en difficulté :\n« Les efforts fournis durant ce semestre sont à souligner. Malgré des difficultés notables en français, une volonté de progresser est présente. Cependant, la compréhension des consignes reste un point essentiel à améliorer : il est important de prendre le temps de bien les lire avant de commencer. Pour le second semestre, des efforts sont attendus. Courage et persévérance sont les clés ; je compte sur toi ! »\n\nRELECTURE avant de répondre — Vérifie que :\n- chaque phrase apporte une information nouvelle ;\n- aucune formulation vague ou artificielle n'est utilisée ;\n- seules les informations fournies sont exploitées (ne rien inventer) ;\n- l'appréciation reste fluide et naturelle à lire ;\n- seules les informations les plus importantes ont été retenues.\n\nLongueur : 5 à 7 phrases. Appréciation unique, sans titre ni introduction. Respecter strictement les consignes de clôture selon le semestre.\nRépondre uniquement avec le texte de l'appréciation." },
+      { "role": "user", "content": format!("/no_think\n{}", prompt) }
     ]
   });
 
   let client = reqwest::Client::new();
   let res = client
-    .post("https://api.groq.com/openai/v1/chat/completions")
-    .bearer_auth(api_key.trim())
+    .post(&ollama_url)
+    .bearer_auth("ollama")
     .header("content-type", "application/json")
     .json(&body)
     .send().await.map_err(|e| e.to_string())?;
@@ -619,13 +623,13 @@ async fn generate_bilan(
   let text = res.text().await.map_err(|e| e.to_string())?;
 
   if !status.is_success() {
-    return Err(format!("Groq HTTP {}: {}", status, text));
+    return Err(format!("Ollama HTTP {}: {}", status, text));
   }
 
   let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
   let content = json["choices"][0]["message"]["content"]
     .as_str()
-    .ok_or("Réponse Groq invalide")?;
+    .ok_or("Réponse Ollama invalide")?;
 
   let mut appreciations = std::collections::HashMap::new();
   appreciations.insert("_global".to_string(), content.trim().to_string());
@@ -696,12 +700,12 @@ async fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<S
   Ok(row.map(|r| r.get("value")))
 }
 
-// ── Test Groq ─────────────────────────────────────────────
+// ── Test Ollama ───────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct TestGroqInput {
-  api_key: String,
   model: String,
+  url: String,
 }
 
 #[derive(Serialize)]
@@ -712,22 +716,15 @@ struct TestGroqOutput {
 
 #[tauri::command]
 async fn test_groq(input: TestGroqInput) -> Result<TestGroqOutput, String> {
-  let api_key = input.api_key.trim();
-  if api_key.is_empty() {
-    return Ok(TestGroqOutput { ok: false, message: "Clé API vide".into() });
-  }
-
   let body = serde_json::json!({
     "model": input.model,
-    "messages": [
-      { "role": "user", "content": "Dis OK" }
-    ]
+    "messages": [{ "role": "user", "content": "Dis OK" }]
   });
 
   let client = reqwest::Client::new();
   let res = client
-    .post("https://api.groq.com/openai/v1/chat/completions")
-    .bearer_auth(api_key)
+    .post(&input.url)
+    .bearer_auth("ollama")
     .header("content-type", "application/json")
     .json(&body)
     .send().await.map_err(|e| e.to_string())?;
@@ -741,7 +738,67 @@ async fn test_groq(input: TestGroqInput) -> Result<TestGroqOutput, String> {
     });
   }
 
-  Ok(TestGroqOutput { ok: true, message: "Connexion Groq OK".into() })
+  Ok(TestGroqOutput { ok: true, message: "Connexion Ollama OK".into() })
+}
+
+// ── Ollama auto-start ─────────────────────────────────────
+
+fn find_ollama_exe() -> Option<PathBuf> {
+  #[cfg(windows)]
+  {
+    if let Ok(out) = std::process::Command::new("where").arg("ollama").output() {
+      if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let first = s.lines().next().unwrap_or("").trim().to_string();
+        if !first.is_empty() {
+          return Some(PathBuf::from(first));
+        }
+      }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+      let p = PathBuf::from(local).join("Programs").join("Ollama").join("ollama.exe");
+      if p.exists() { return Some(p); }
+    }
+  }
+  #[cfg(not(windows))]
+  {
+    for candidate in &["/usr/local/bin/ollama", "/usr/bin/ollama"] {
+      let p = PathBuf::from(candidate);
+      if p.exists() { return Some(p); }
+    }
+  }
+  None
+}
+
+async fn ensure_ollama_running() {
+  let client = reqwest::Client::new();
+  let alive = client
+    .get("http://localhost:11434")
+    .timeout(std::time::Duration::from_secs(2))
+    .send().await.is_ok();
+  if alive { return; }
+
+  if let Some(exe) = find_ollama_exe() {
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("serve");
+    #[cfg(windows)]
+    {
+      use std::os::windows::process::CommandExt;
+      cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let _ = cmd.spawn();
+
+    for _ in 0..20 {
+      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+      if client
+        .get("http://localhost:11434")
+        .timeout(std::time::Duration::from_secs(1))
+        .send().await.is_ok()
+      {
+        break;
+      }
+    }
+  }
 }
 
 // ── App bootstrap ─────────────────────────────────────────
@@ -775,6 +832,7 @@ pub fn run() {
       })?;
 
       app.manage(AppState { db });
+      tauri::async_runtime::spawn(ensure_ollama_running());
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
